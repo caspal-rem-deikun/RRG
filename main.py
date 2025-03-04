@@ -11,6 +11,18 @@ from datetime import date, timedelta
 predefined_lists = {
     "SPDR Sector ETFs": ["XLB", "XLE", "XLF", "XLI", "XLK", "XLP", "XLU", "XLV", "XLRE"],
     "FAANG": ["AAPL", "MSFT", "GOOGL", "AMZN", "META"],
+    "Mega Caps": [
+        "AAPL",   # Apple
+        "MSFT",   # Microsoft
+        "GOOGL",  # Alphabet (Google)
+        "AMZN",   # Amazon
+        "META",   # Meta Platforms
+        "TSLA",   # Tesla
+        "NVDA",   # Nvidia
+        "BRK-B",  # Berkshire Hathaway (Class B shares)
+        "UNH",    # UnitedHealth Group
+        "XOM"     # Exxon Mobil
+    ]
 }
 
 ############################
@@ -47,7 +59,6 @@ def fetch_stock_data(symbols, start, end, interval='1d'):
         data[sym.upper()] = series
     return data
 
-
 def combine_data_to_df(data_dict, resample_freq=None):
     """Combine a dictionary of {symbol: price_series} into a single DataFrame."""
     if not data_dict:
@@ -56,7 +67,6 @@ def combine_data_to_df(data_dict, resample_freq=None):
     if resample_freq:
         df = df.resample(resample_freq).last()
     return df
-
 
 def compute_jdk_indicators(stock_series, ref_series_or_one, short_window=5, long_window=10):
     """
@@ -105,7 +115,6 @@ def compute_jdk_indicators(stock_series, ref_series_or_one, short_window=5, long
     df = df.dropna()
     return df['RS_Ratio'], df['raw_momentum']
 
-
 def prepare_rrg_dataframe(symbols, df_prices, reference_input="SPY"):
     """
     Build a DataFrame with columns [Date, Symbol, RS_Ratio, RS_Momentum].
@@ -140,6 +149,7 @@ def prepare_rrg_dataframe(symbols, df_prices, reference_input="SPY"):
         if len(stock_series) < 2:
             continue
         
+        # If the symbol is the reference, keep it at (100,100).
         if ref_input != "ONE" and sym == ref_input:
             rs_ratio, raw_mom = compute_jdk_indicators(stock_series, stock_series)
         else:
@@ -163,7 +173,7 @@ def prepare_rrg_dataframe(symbols, df_prices, reference_input="SPY"):
             'Symbol': sym,
             'RS_Ratio': rs_ratio.values
         })
-        norm_mom = norm_mom.reindex(rs_ratio.index).fillna(method='ffill').fillna(method='bfill')
+        norm_mom = norm_mom.reindex(rs_ratio.index).ffill().bfill()
         df_temp['RS_Momentum'] = norm_mom.values
         rrg_rows.append(df_temp)
     
@@ -172,7 +182,7 @@ def prepare_rrg_dataframe(symbols, df_prices, reference_input="SPY"):
     
     rrg_df = pd.concat(rrg_rows, ignore_index=True)
     
-    # If reference != "ONE", force the reference stock's values to (100,100)
+    # Force the reference stock's values to (100,100) so it is placed in the middle.
     if ref_input != "ONE" and ref_input in rrg_df['Symbol'].unique():
         rrg_df.loc[rrg_df['Symbol'] == ref_input, 'RS_Ratio'] = 100.0
         rrg_df.loc[rrg_df['Symbol'] == ref_input, 'RS_Momentum'] = 100.0
@@ -187,32 +197,53 @@ def prepare_rrg_dataframe(symbols, df_prices, reference_input="SPY"):
     rrg_df = rrg_df.dropna(subset=['RS_Ratio', 'RS_Momentum'])
     return rrg_df
 
-
-def create_rrg_plotly(rrg_df, trail_length=5, auto_scale=True):
+def create_rrg_plotly(rrg_df, trail_length=5):
     """
     Create an interactive Plotly RRG with animation.
-    
-    If auto_scale is True, set Plotly's autorange so that all points and trails fit the frame.
-    Otherwise, compute axis bounds from the data.
-    Also adds quadrant shading with the center at (100,100).
+    - The reference symbol is forced to (100,100).
+    - We compute axis bounds around (100,100) so that if data is close to 100, we "zoom in";
+      if data is far from 100, we "zoom out".
+    - Each symbol's marker and trail line are colored based on the quadrant of its latest point:
+          * Green: RS_Ratio >= 100 and RS_Momentum >= 100
+          * Orange: RS_Ratio >= 100 and RS_Momentum < 100
+          * Blue: RS_Ratio < 100 and RS_Momentum >= 100
+          * Red: RS_Ratio < 100 and RS_Momentum < 100
     """
     if rrg_df.empty:
         fig = go.Figure()
         fig.update_layout(title="No Data Available")
         return fig
-    
+
     symbols = rrg_df["Symbol"].unique()
     dates = sorted(rrg_df["Date"].unique())
-    
-    if not auto_scale:
-        x_min = min(rrg_df['RS_Ratio'].min(), 100) - 5
-        x_max = max(rrg_df['RS_Ratio'].max(), 100) + 5
-        y_min = min(rrg_df['RS_Momentum'].min(), 100) - 5
-        y_max = max(rrg_df['RS_Momentum'].max(), 100) + 5
-    
+
+    # Compute the min/max from the data
+    x_min_data = rrg_df['RS_Ratio'].min()
+    x_max_data = rrg_df['RS_Ratio'].max()
+    y_min_data = rrg_df['RS_Momentum'].min()
+    y_max_data = rrg_df['RS_Momentum'].max()
+
+    # Determine the maximum distance from 100 in each direction.
+    dist_left   = abs(100 - x_min_data)
+    dist_right  = abs(x_max_data - 100)
+    dist_bottom = abs(100 - y_min_data)
+    dist_top    = abs(y_max_data - 100)
+
+    delta = max(dist_left, dist_right, dist_bottom, dist_top)
+    delta += 0.2  # add small padding
+    min_delta = 1.0  # enforce a minimum delta
+    if delta < min_delta:
+        delta = min_delta
+
+    x_min = 100 - delta
+    x_max = 100 + delta
+    y_min = 100 - delta
+    y_max = 100 + delta
+
     fig = go.Figure()
     frames = []
-    
+
+    # Build animation frames
     for dt in dates:
         frame_data = []
         for symbol in symbols:
@@ -220,65 +251,83 @@ def create_rrg_plotly(rrg_df, trail_length=5, auto_scale=True):
             sym_data = sym_data[sym_data["Date"] <= dt]
             sym_data_trail = sym_data.tail(trail_length)
             if not sym_data_trail.empty:
+                # Determine color based on the last point's quadrant.
+                last_point = sym_data_trail.iloc[-1]
+                x_val = last_point["RS_Ratio"]
+                y_val = last_point["RS_Momentum"]
+                if x_val >= 100:
+                    if y_val >= 100:
+                        color = "green"
+                    else:
+                        color = "orange"
+                else:
+                    if y_val >= 100:
+                        color = "blue"
+                    else:
+                        color = "red"
+
+                # Marker trace (latest point) with text label
                 frame_data.append(
                     go.Scatter(
-                        x=[sym_data_trail.iloc[-1]["RS_Ratio"]],
-                        y=[sym_data_trail.iloc[-1]["RS_Momentum"]],
+                        x=[x_val],
+                        y=[y_val],
                         mode="markers+text",
                         text=[symbol],
                         textposition="top center",
-                        marker=dict(size=8),
+                        marker=dict(size=8, color=color),
                         name=symbol,
                         showlegend=False
                     )
                 )
+                # Trail line trace with the same color
                 frame_data.append(
                     go.Scatter(
                         x=sym_data_trail["RS_Ratio"],
                         y=sym_data_trail["RS_Momentum"],
                         mode="lines",
-                        line=dict(width=2, shape="spline"),
+                        line=dict(width=2, shape="spline", color=color),
                         name=symbol + " trail",
                         showlegend=False
                     )
                 )
         frames.append(go.Frame(data=frame_data, name=str(dt)))
-    
+
     if frames:
         fig.add_traces(frames[0].data)
-    
+
+    # Set symmetrical axis range around (100,100)
+    fig.update_layout(
+        xaxis=dict(range=[x_min, x_max]),
+        yaxis=dict(range=[y_min, y_max])
+    )
+
     # Quadrant shading with center at (100,100)
-    # The center remains fixed; if auto_scale is off, use computed ranges.
-    if auto_scale:
-        fig.update_layout(xaxis=dict(autorange=True), yaxis=dict(autorange=True))
-    else:
-        fig.update_layout(xaxis=dict(range=[x_min, x_max]), yaxis=dict(range=[y_min, y_max]))
-    
     fig.add_shape(
         type="rect", xref="x", yref="y",
-        x0=100, x1=fig.layout.xaxis.range[1] if not auto_scale else 100+50,
-        y0=100, y1=fig.layout.yaxis.range[1] if not auto_scale else 100+50,
+        x0=100, x1=200,
+        y0=100, y1=200,
         fillcolor="green", opacity=0.1, layer="below", line_width=0
     )
     fig.add_shape(
         type="rect", xref="x", yref="y",
-        x0=100, x1=fig.layout.xaxis.range[1] if not auto_scale else 100+50,
-        y0=fig.layout.yaxis.range[0] if not auto_scale else 100-50, y1=100,
+        x0=100, x1=200,
+        y0=0, y1=100,
         fillcolor="orange", opacity=0.1, layer="below", line_width=0
     )
     fig.add_shape(
         type="rect", xref="x", yref="y",
-        x0=fig.layout.xaxis.range[0] if not auto_scale else 100-50, x1=100,
-        y0=fig.layout.yaxis.range[0] if not auto_scale else 100-50, y1=100,
+        x0=0, x1=100,
+        y0=0, y1=100,
         fillcolor="red", opacity=0.1, layer="below", line_width=0
     )
     fig.add_shape(
         type="rect", xref="x", yref="y",
-        x0=fig.layout.xaxis.range[0] if not auto_scale else 100-50, x1=100,
-        y0=100, y1=fig.layout.yaxis.range[1] if not auto_scale else 100+50,
+        x0=0, x1=100,
+        y0=100, y1=200,
         fillcolor="blue", opacity=0.1, layer="below", line_width=0
     )
-    
+
+    # Add Play/Pause buttons
     fig.update_layout(
         title="Relative Rotation Graph (RRG)",
         xaxis_title="JdK RS Ratio",
@@ -291,32 +340,42 @@ def create_rrg_plotly(rrg_df, trail_length=5, auto_scale=True):
                 {
                     "label": "Play",
                     "method": "animate",
-                    "args": [None, {"frame": {"duration": 500, "redraw": True},
-                                    "fromcurrent": True,
-                                    "transition": {"duration": 300},
-                                    "mode": "immediate"}]
+                    "args": [None, {
+                        "frame": {"duration": 500, "redraw": True},
+                        "fromcurrent": True,
+                        "transition": {"duration": 300},
+                        "mode": "immediate"
+                    }]
                 },
                 {
                     "label": "Pause",
                     "method": "animate",
-                    "args": [[None], {"frame": {"duration": 0, "redraw": False},
-                                      "mode": "immediate",
-                                      "transition": {"duration": 0}}]
+                    "args": [[None], {
+                        "frame": {"duration": 0, "redraw": False},
+                        "mode": "immediate",
+                        "transition": {"duration": 0}
+                    }]
                 }
             ]
         }]
     )
-    
+
+    # Add slider
     sliders = [{
         "steps": [
             {
                 "method": "animate",
-                "args": [[frame.name],
-                         {"mode": "immediate",
-                          "frame": {"duration": 300, "redraw": True},
-                          "transition": {"duration": 300}}],
+                "args": [
+                    [frame.name],
+                    {
+                        "mode": "immediate",
+                        "frame": {"duration": 300, "redraw": True},
+                        "transition": {"duration": 300}
+                    }
+                ],
                 "label": frame.name,
-            } for frame in frames
+            }
+            for frame in frames
         ],
         "transition": {"duration": 0},
         "x": 0,
@@ -327,8 +386,197 @@ def create_rrg_plotly(rrg_df, trail_length=5, auto_scale=True):
     }]
     fig.update_layout(sliders=sliders)
     fig.frames = frames
+
+    # Increase overall figure size and reduce margins
+    fig.update_layout(
+        width=1400,
+        height=900,
+        margin=dict(l=20, r=20, t=60, b=20)
+    )
+    
     return fig
 
+    """
+    Create an interactive Plotly RRG with animation.
+    - The reference symbol is forced to (100,100).
+    - We compute axis bounds around (100,100) so that if data is close to 100, we "zoom in";
+      if data is far from 100, we "zoom out".
+    - This ensures the data occupies more of the chart area (rather than looking cramped).
+    """
+    if rrg_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title="No Data Available")
+        return fig
+
+    symbols = rrg_df["Symbol"].unique()
+    dates = sorted(rrg_df["Date"].unique())
+
+    # Compute the min/max from the data
+    x_min_data = rrg_df['RS_Ratio'].min()
+    x_max_data = rrg_df['RS_Ratio'].max()
+    y_min_data = rrg_df['RS_Momentum'].min()
+    y_max_data = rrg_df['RS_Momentum'].max()
+
+    # Distance from 100 in each direction
+    dist_left   = abs(100 - x_min_data)
+    dist_right  = abs(x_max_data - 100)
+    dist_bottom = abs(100 - y_min_data)
+    dist_top    = abs(y_max_data - 100)
+
+    # We'll use the largest distance among x or y
+    # If the data is close to 100, this distance can be small
+    # so we add a tiny padding (0.2). Also set a minimum (e.g. 1.0).
+    delta = max(dist_left, dist_right, dist_bottom, dist_top)
+    delta += 0.2  # small padding
+    min_delta = 1.0  # ensure at least a 2-point range
+    if delta < min_delta:
+        delta = min_delta
+
+    x_min = 100 - delta
+    x_max = 100 + delta
+    y_min = 100 - delta
+    y_max = 100 + delta
+
+    fig = go.Figure()
+    frames = []
+
+    # Build animation frames
+    for dt in dates:
+        frame_data = []
+        for symbol in symbols:
+            sym_data = rrg_df[rrg_df["Symbol"] == symbol].sort_values("Date")
+            sym_data = sym_data[sym_data["Date"] <= dt]
+            sym_data_trail = sym_data.tail(trail_length)
+            if not sym_data_trail.empty:
+                # Marker at the latest point
+                frame_data.append(
+                    go.Scatter(
+                        x=[sym_data_trail.iloc[-1]["RS_Ratio"]],
+                        y=[sym_data_trail.iloc[-1]["RS_Momentum"]],
+                        mode="markers+text",
+                        text=[symbol],
+                        textposition="top center",
+                        marker=dict(size=8),
+                        name=symbol,
+                        showlegend=False
+                    )
+                )
+                # Trail line
+                frame_data.append(
+                    go.Scatter(
+                        x=sym_data_trail["RS_Ratio"],
+                        y=sym_data_trail["RS_Momentum"],
+                        mode="lines",
+                        line=dict(width=2, shape="spline"),
+                        name=symbol + " trail",
+                        showlegend=False
+                    )
+                )
+        frames.append(go.Frame(data=frame_data, name=str(dt)))
+
+    if frames:
+        fig.add_traces(frames[0].data)
+
+    # Symmetrical axis range around (100,100)
+    fig.update_layout(
+        xaxis=dict(range=[x_min, x_max]),
+        yaxis=dict(range=[y_min, y_max])
+    )
+
+    # Quadrant shading with center at (100,100)
+    fig.add_shape(
+        type="rect", xref="x", yref="y",
+        x0=100, x1=200,
+        y0=100, y1=200,
+        fillcolor="green", opacity=0.1, layer="below", line_width=0
+    )
+    fig.add_shape(
+        type="rect", xref="x", yref="y",
+        x0=100, x1=200,
+        y0=0, y1=100,
+        fillcolor="orange", opacity=0.1, layer="below", line_width=0
+    )
+    fig.add_shape(
+        type="rect", xref="x", yref="y",
+        x0=0, x1=100,
+        y0=0, y1=100,
+        fillcolor="red", opacity=0.1, layer="below", line_width=0
+    )
+    fig.add_shape(
+        type="rect", xref="x", yref="y",
+        x0=0, x1=100,
+        y0=100, y1=200,
+        fillcolor="blue", opacity=0.1, layer="below", line_width=0
+    )
+
+    # Add Play/Pause buttons
+    fig.update_layout(
+        title="Relative Rotation Graph (RRG)",
+        xaxis_title="JdK RS Ratio",
+        yaxis_title="JdK RS Momentum",
+        hovermode="closest",
+        updatemenus=[{
+            "type": "buttons",
+            "showactive": False,
+            "buttons": [
+                {
+                    "label": "Play",
+                    "method": "animate",
+                    "args": [None, {
+                        "frame": {"duration": 500, "redraw": True},
+                        "fromcurrent": True,
+                        "transition": {"duration": 300},
+                        "mode": "immediate"
+                    }]
+                },
+                {
+                    "label": "Pause",
+                    "method": "animate",
+                    "args": [[None], {
+                        "frame": {"duration": 0, "redraw": False},
+                        "mode": "immediate",
+                        "transition": {"duration": 0}
+                    }]
+                }
+            ]
+        }]
+    )
+
+    # Add a slider to scrub through time
+    sliders = [{
+        "steps": [
+            {
+                "method": "animate",
+                "args": [
+                    [frame.name],
+                    {
+                        "mode": "immediate",
+                        "frame": {"duration": 300, "redraw": True},
+                        "transition": {"duration": 300}
+                    }
+                ],
+                "label": frame.name,
+            }
+            for frame in frames
+        ],
+        "transition": {"duration": 0},
+        "x": 0,
+        "y": 0,
+        "xanchor": "left",
+        "yanchor": "top",
+        "len": 1.0,
+    }]
+    fig.update_layout(sliders=sliders)
+    fig.frames = frames
+
+    # Make the figure bigger and reduce margins
+    fig.update_layout(
+        width=1200,
+        height=600,
+        margin=dict(l=20, r=20, t=60, b=20)
+    )
+    
+    return fig
 
 ############################
 # Streamlit App
@@ -359,11 +607,8 @@ def main():
     data_period_options = ["3 months", "6 months", "1 year", "2 years", "5 years", "10 years", "All time"]
     data_period = st.selectbox("Select data period:", data_period_options)
     
-    # Trail length is now separate
     trail_length_options = [7, 14, 21, 28]
     selected_trail_length = st.selectbox("Select trail length (days):", trail_length_options)
-    
-    auto_scale = st.checkbox("Auto scale axes", value=True)
     
     if data_period == "All time":
         start_date = pd.to_datetime("1900-01-01")
@@ -401,9 +646,8 @@ def main():
             st.warning("No RRG data available. Not enough overlapping data for the chosen symbols.")
             return
         
-        fig = create_rrg_plotly(rrg_df, trail_length=selected_trail_length, auto_scale=auto_scale)
-        st.plotly_chart(fig, use_container_width=True)
-
+        fig = create_rrg_plotly(rrg_df, trail_length=selected_trail_length)
+        st.plotly_chart(fig, use_container_width=False)
 
 if __name__ == "__main__":
     main()
