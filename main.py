@@ -380,7 +380,7 @@ def create_rrg_plotly(rrg_df, trail_length=5):
 
     fig.update_layout(
         width=1400,
-        height=900,
+        height=700,
         margin=dict(l=20, r=20, t=60, b=20)
     )
     
